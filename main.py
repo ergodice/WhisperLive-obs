@@ -6,6 +6,7 @@ from whisper_live.client import TranscriptionClient
 import argparse
 import hashlib
 import base64
+import re
 
 
 class WhisperToOBSBridge:
@@ -15,7 +16,8 @@ class WhisperToOBSBridge:
     """
     
     def __init__(self, obs_host='localhost', obs_port=4444, obs_password=None, 
-                 text_source_name='TranscribedText', max_words=None, final_text_only=False):
+                 text_source_name='TranscribedText', max_words=None, final_text_only=False,
+                 sentence_mode=False):
         """
         Args:
             obs_host: OBS WebSocket サーバーのホスト名
@@ -24,6 +26,7 @@ class WhisperToOBSBridge:
             text_source_name: テキストを書き込む OBS テキストソースの名前
             max_words: 表示する最大語数（デフォルト: 全て表示）
             final_text_only: 確定済みテキストのみを表示するか（デフォルト: False）
+            sentence_mode: 文章単位で表示するか（デフォルト: False）
         """
         self.obs_host = obs_host
         self.obs_port = obs_port
@@ -31,12 +34,14 @@ class WhisperToOBSBridge:
         self.text_source_name = text_source_name
         self.max_words = max_words
         self.final_text_only = final_text_only
+        self.sentence_mode = sentence_mode
         self.obs_ws = None
         self.connect_lock = threading.Lock()
         self.request_id = 0
         self.identified = False
         self.challenge = None
         self.salt = None
+        self.last_displayed_text = ""  # 最後に表示したテキストを記録
         self.connect_to_obs()
         
     def get_request_id(self):
@@ -54,6 +59,42 @@ class WhisperToOBSBridge:
             truncated = ' '.join(words[-self.max_words:])
             return truncated + '...'
         return text
+    
+    def extract_sentences(self, text):
+        """
+        テキストから完全な文章を抽出
+        句点（。）、感嘆符（！）、疑問符（？）で区切られた部分を抽出
+        
+        Args:
+            text: テキスト
+            
+        Returns:
+            tuple: (完全な文章のリスト, 残りのテキスト)
+        """
+        # 日本語と英語の句点に対応
+        sentence_endings = r'[。！？\.!?]'
+        
+        sentences = []
+        remaining_text = text
+        
+        # 句点で区切られた完全な文章を抽出
+        parts = re.split(f'({sentence_endings})', text)
+        
+        completed_sentences = []
+        incomplete_part = ""
+        
+        for i in range(0, len(parts), 2):
+            if i + 1 < len(parts):
+                # 句点を含む完全な文章
+                sentence = parts[i] + parts[i + 1]
+                if sentence.strip():
+                    completed_sentences.append(sentence)
+            else:
+                # 句点を含まない残りのテキスト
+                if parts[i].strip():
+                    incomplete_part = parts[i]
+        
+        return completed_sentences, incomplete_part
     
     def connect_to_obs(self):
         """OBS WebSocket サーバーに接続"""
@@ -82,6 +123,8 @@ class WhisperToOBSBridge:
                         print(f"[INFO]: 表示する最大語数: {self.max_words}")
                     if self.final_text_only:
                         print(f"[INFO]: 確定済みテキストのみを表示します")
+                    if self.sentence_mode:
+                        print(f"[INFO]: 文章単位で表示します")
                     return
                 time.sleep(0.1)
             
@@ -91,6 +134,8 @@ class WhisperToOBSBridge:
                     print(f"[INFO]: 表示する最大語数: {self.max_words}")
                 if self.final_text_only:
                     print(f"[INFO]: 確定済みテキストのみを表示します")
+                if self.sentence_mode:
+                    print(f"[INFO]: 文章単位で表示します")
                 self.identified = True  # 認証なしでも続行
             
         except Exception as e:
@@ -260,6 +305,20 @@ class WhisperToOBSBridge:
         """
         print(f"[TRANSCRIPTION]: {text}")
         
+        # 文章単位で表示するモード
+        if self.sentence_mode:
+            sentences, remaining = self.extract_sentences(text)
+            
+            if sentences:
+                for sentence in sentences:
+                    # 最後に表示したテキストと重複していないかチェック
+                    if sentence.strip() not in self.last_displayed_text:
+                        print(f"[SENTENCE]: {sentence}")
+                        self.update_text_source(sentence)
+                        self.last_displayed_text = sentence
+            
+            return
+        
         # 確定済みテキストのみを表示する設定の場合
         if self.final_text_only:
             if self.is_final_text(segments):
@@ -320,6 +379,9 @@ def main():
     parser.add_argument('--final-text-only',
                         action='store_true',
                         help='確定済みテキストのみを OBS に表示')
+    parser.add_argument('--sentence-mode',
+                        action='store_true',
+                        help='文章単位（句点で区切られた部分）でのみ OBS に表示')
     
     # Whisper オプション
     parser.add_argument('--model', '-m',
@@ -344,7 +406,8 @@ def main():
             obs_password=args.obs_password,
             text_source_name=args.obs_text_source,
             max_words=args.max_words,
-            final_text_only=args.final_text_only
+            final_text_only=args.final_text_only,
+            sentence_mode=args.sentence_mode
         )
         
         # WhisperLive クライアントの初期化
